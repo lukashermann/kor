@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
 
+import numpy as np
+import tiktoken
 from langchain import BasePromptTemplate
+from langchain.base_language import BaseLanguageModel
 from langchain.prompts import PromptTemplate
 from langchain.schema import (
     AIMessage,
@@ -36,6 +39,14 @@ DEFAULT_INSTRUCTION_TEMPLATE = PromptTemplate(
 )
 
 
+def get_num_tokens(sentence):
+    enc = tiktoken.encoding_for_model("gpt-3.5-turbo")
+    # encode the text using the GPT-3.5-Turbo encoder
+    tokenized_text = enc.encode(sentence)
+    num_text_tokens = len(tokenized_text)
+    return num_text_tokens
+
+
 class ExtractionPromptValue(PromptValue):
     """Integration with langchain prompt format."""
 
@@ -62,9 +73,11 @@ class ExtractionPromptTemplate(BasePromptTemplate):
 
     encoder: Encoder
     node: Object
+    llm: BaseLanguageModel
     type_descriptor: TypeDescriptor
     input_formatter: InputFormatter
     instruction_template: PromptTemplate
+    max_tokens: int = 4096
 
     class Config:
         """Configuration for this pydantic object."""
@@ -94,7 +107,7 @@ class ExtractionPromptTemplate(BasePromptTemplate):
     def to_string(self, text: str) -> str:
         """Format the template to a string."""
         instruction_segment = self.format_instruction_segment(self.node)
-        encoded_examples = self.generate_encoded_examples(self.node)
+        encoded_examples = self.generate_encoded_examples(self.node, text, instruction_segment)
         formatted_examples: List[str] = []
 
         for in_example, output in encoded_examples:
@@ -114,7 +127,7 @@ class ExtractionPromptTemplate(BasePromptTemplate):
         instruction_segment = self.format_instruction_segment(self.node)
 
         messages: List[BaseMessage] = [SystemMessage(content=instruction_segment)]
-        encoded_examples = self.generate_encoded_examples(self.node)
+        encoded_examples = self.generate_encoded_examples(self.node, text, instruction_segment)
 
         for example_input, example_output in encoded_examples:
             messages.extend(
@@ -127,12 +140,25 @@ class ExtractionPromptTemplate(BasePromptTemplate):
         messages.append(HumanMessage(content=text))
         return messages
 
-    def generate_encoded_examples(self, node: Object) -> List[Tuple[str, str]]:
+    def generate_encoded_examples(self, node: Object, text, instruction_segment) -> List[Tuple[str, str]]:
         """Generate encoded examples."""
         examples = generate_examples(node)
-        return encode_examples(
+        examples_enc = encode_examples(
             examples, self.encoder, input_formatter=self.input_formatter
         )
+        num_instruction_tokes = get_num_tokens(instruction_segment)
+        num_text_tokens = get_num_tokens(text)
+        num_example_tokens_list = [get_num_tokens(example[0]) + get_num_tokens(example[1]) for example in examples_enc]
+        num_example_tokens = sum(num_example_tokens_list)
+        max_example_tokens = (self.max_tokens - num_instruction_tokes - num_text_tokens - self.llm.max_tokens - 200)
+
+        if max_example_tokens < num_example_tokens:
+            pick_n_examples = np.where(max_example_tokens < np.cumsum(num_example_tokens_list))[0][0]
+            examples_enc = examples_enc[:pick_n_examples]
+            num_example_tokens = sum(num_example_tokens_list[:pick_n_examples])
+
+        print(f"num tokens: {num_instruction_tokes + num_text_tokens + num_example_tokens}")
+        return examples_enc
 
     def format_instruction_segment(self, node: Object) -> str:
         """Generate the instruction segment of the extraction."""
@@ -158,6 +184,7 @@ def create_langchain_prompt(
     schema: Object,
     encoder: Encoder,
     type_descriptor: TypeDescriptor,
+    llm,
     *,
     validator: Optional[Validator] = None,
     input_formatter: InputFormatter = None,
@@ -169,6 +196,7 @@ def create_langchain_prompt(
         output_parser=KorParser(encoder=encoder, validator=validator, schema_=schema),
         encoder=encoder,
         node=schema,
+        llm=llm,
         input_formatter=input_formatter,
         type_descriptor=type_descriptor,
         instruction_template=instruction_template or DEFAULT_INSTRUCTION_TEMPLATE,

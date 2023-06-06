@@ -111,6 +111,7 @@ def create_extraction_chain(
             node,
             encoder,
             type_descriptor_to_use,
+            llm,
             validator=validator,
             instruction_template=instruction_template,
             input_formatter=input_formatter,
