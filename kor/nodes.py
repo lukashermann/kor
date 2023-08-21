@@ -1,4 +1,6 @@
 """Definitions of input elements."""
+from __future__ import annotations
+
 import abc
 import copy
 import re
@@ -9,6 +11,7 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Type,
     TypeVar,
     Union,
 )
@@ -24,6 +27,9 @@ from pydantic import BaseModel, validator
 # not worth the effort for a v0.
 VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-z_][0-9a-z_]*$")
 
+# Name of field to store the type discriminator
+TYPE_DISCRIMINATOR_FIELD = "$type"
+
 T = TypeVar("T")
 
 
@@ -31,29 +37,33 @@ T = TypeVar("T")
 class AbstractVisitor(Generic[T], abc.ABC):
     """An abstract visitor."""
 
-    def visit_text(self, node: "Text", **kwargs: Any) -> T:
+    def visit_text(self, node: Text, **kwargs: Any) -> T:
         """Visit text node."""
         return self.visit_default(node, **kwargs)
 
-    def visit_number(self, node: "Number", **kwargs: Any) -> T:
+    def visit_number(self, node: Number, **kwargs: Any) -> T:
         """Visit text node."""
         return self.visit_default(node, **kwargs)
 
-    def visit_object(self, node: "Object", **kwargs: Any) -> T:
+    def visit_object(self, node: Object, **kwargs: Any) -> T:
         """Visit object node."""
         return self.visit_default(node, **kwargs)
 
-    def visit_selection(self, node: "Selection", **kwargs: Any) -> T:
+    def visit_selection(self, node: Selection, **kwargs: Any) -> T:
         """Visit selection node."""
         return self.visit_default(node, **kwargs)
 
-    def visit_option(self, node: "Option", **kwargs: Any) -> T:
+    def visit_option(self, node: Option, **kwargs: Any) -> T:
         """Visit option node."""
         return self.visit_default(node, **kwargs)
 
-    def visit_default(self, node: "AbstractSchemaNode", **kwargs: Any) -> T:
+    def visit_default(self, node: AbstractSchemaNode, **kwargs: Any) -> T:
         """Default node implementation."""
         raise NotImplementedError()
+
+    def visit_bool(self, node: Bool, **kwargs: Any) -> T:
+        """Visit bool node."""
+        return self.visit_default(node, **kwargs)
 
 
 class AbstractSchemaNode(BaseModel):
@@ -123,6 +133,30 @@ class ExtractionSchemaNode(AbstractSchemaNode, abc.ABC):
 
     examples: Sequence[Tuple[str, Union[str, Sequence[str]]]] = tuple()
 
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.__dict__[TYPE_DISCRIMINATOR_FIELD] = type(self).__name__
+
+    @classmethod
+    def parse_obj(cls: Type[ExtractionSchemaNode], data: dict) -> ExtractionSchemaNode:
+        """Parse an object."""
+        type_ = data.pop(TYPE_DISCRIMINATOR_FIELD, None)
+        if type_ is None:
+            raise ValueError(f"Need to specify type ({TYPE_DISCRIMINATOR_FIELD})")
+        for sub in cls.__subclasses__():
+            if type_ == sub.__name__:
+                return sub(**data)
+        raise TypeError(f"Unknown sub-type: {type_}")
+
+    @classmethod
+    def validate(cls: Type[ExtractionSchemaNode], v: Any) -> ExtractionSchemaNode:
+        if isinstance(v, dict):
+            return cls.parse_obj(v)
+        elif isinstance(v, cls):
+            return v
+        else:
+            raise TypeError(f"Unsupported type: {type(v)}")
+
 
 class Number(ExtractionSchemaNode):
     """Built-in number input."""
@@ -138,6 +172,14 @@ class Text(ExtractionSchemaNode):
     def accept(self, visitor: AbstractVisitor[T], **kwargs: Any) -> T:
         """Accept a visitor."""
         return visitor.visit_text(self, **kwargs)
+
+
+class Bool(ExtractionSchemaNode):
+    """Built-in bool input."""
+
+    def accept(self, visitor: AbstractVisitor[T], **kwargs: Any) -> T:
+        """Accept a visitor."""
+        return visitor.visit_bool(self, **kwargs)
 
 
 class Option(AbstractSchemaNode):
@@ -219,7 +261,7 @@ class Object(AbstractSchemaNode):
 
     """
 
-    attributes: Sequence[Union[ExtractionSchemaNode, Selection, "Object"]]
+    attributes: Sequence[Union[ExtractionSchemaNode, Selection, Object]]
 
     examples: Sequence[
         Tuple[
